@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+<meta charset='UTF-8'>
+<title>Piano Pattern Exercise Generator</title>
+<script src='https://cdnjs.cloudflare.com/ajax/libs/tone/14.7.77/Tone.js'></script>
+<script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.27/build/Midi.min.js"></script>
+<style>
+  /* --- WRAPPER TO PREVENT THEME CONFLICTS --- */
+  #piano-app-wrapper { 
+    font-family: Arial, sans-serif; 
+    padding: 20px; 
+    background: linear-gradient(135deg,#6a0dad,#4b0082); 
+    color: #fff; 
+    border-radius: 12px;
+    margin: 20px 0;
+    box-sizing: border-box;
+    width: 100%;
+    overflow: hidden;
+  }
+  
+  #piano-app-wrapper label { display:block; margin:8px 0; font-weight:bold; color: #fff !important; }
+  #piano-app-wrapper select, #piano-app-wrapper input { 
+    margin-top:4px; padding:6px; font-size:14px; border-radius:4px; border:none; color: #000 !important; background: #fff !important;
+  }
+  #piano-app-wrapper button { 
+    margin-top:12px; background:#00f; color:#fff !important; cursor:pointer; font-weight:bold; padding: 10px 15px; border: none; border-radius: 4px;
+  }
+  #piano-app-wrapper button:hover { background:#0080ff; }
+  #piano-app-wrapper h3 { text-align:center; color: #fff !important; margin-bottom: 20px; }
+
+  /* --- KEYBOARD VISIBILITY FIX --- */
+  #keyboard-container {
+    width: 100%;
+    overflow-x: auto;
+    background: rgba(0,0,0,0.4);
+    padding: 20px 0;
+    margin-top: 20px;
+    border-radius: 8px;
+  }
+
+  #keyboard { 
+    display: block; 
+    position: relative; 
+    height: 140px; /* Force height so keys aren't flat */
+    margin: 0 auto;
+  }
+
+  .key { 
+    width: 28px; 
+    height: 120px; 
+    margin: 1px; 
+    border: 1px solid #000; 
+    border-radius: 0 0 4px 4px; 
+    position: absolute; 
+    background: white; 
+    transition: background 0.1s; 
+    z-index: 1;
+  }
+
+  .key.black { 
+    width: 18px; 
+    height: 80px; 
+    background: black; 
+    z-index: 2; /* Ensure black keys are on top */
+  }
+
+  .active { background: #ff0 !important; }
+  .match-glow { background: #0ff !important; box-shadow: 0 0 15px #0ff; z-index: 3; }
+
+  /* --- TIMELINE --- */
+  #timelineContainer { margin: 25px 0; display: flex; align-items: center; gap: 10px; }
+  #timeline { flex-grow: 1; cursor: pointer; }
+  #timeLabel { min-width: 100px; font-family: monospace; }
+  
+  .vocal-panel { border: 2px solid #0ff; padding: 15px; border-radius: 8px; margin-bottom: 20px; background: rgba(0,0,0,0.3); }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+
+<div id="piano-app-wrapper">
+    <div class="vocal-panel">
+      <label>Operational Mode:</label>
+      <select id="mainMode" onchange="toggleModeUI()" style="width: 100%; max-width: 400px;">
+        <option value="generator">Generator / MIDI Mode</option>
+        <option value="vocal">Vocal Trainer Mode</option>
+      </select>
+      <div id="vocalUI" class="hidden">
+        <button onclick="initVocalMic()" style="background:#0ff; color:#000 !important;">🎤 Start Microphone</button>
+        <div id="vocalStatus" style="color:#0ff; font-weight:bold; margin-top:10px;">Waiting for input...</div>
+        <div id="pitchGuide" style="color:#ffeb3b; font-weight:bold;">--</div>
+      </div>
+    </div>
+
+    <h3>Piano Pattern Generator</h3>
+
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px;">
+        <div>
+            <label>Root Highlight:</label>
+            <span class="note-select"><select id='rootNoteName'></select><select id='rootNoteOctave'></select></span>
+        </div>
+        <div>
+            <label>Scale Type:</label>
+            <select id='scaleType'><option value='major'>Major</option><option value='minor'>Natural Minor</option></select>
+        </div>
+        <div>
+            <label>Pattern (degrees):</label>
+            <input id='pattern' value='1,3,5'>
+        </div>
+        <div>
+            <label>Range (Low to High):</label>
+            <span class="note-select"><select id='rangeStartName'></select><select id='rangeStartOctave'></select></span>
+            <span class="note-select"><select id='rangeEndName'></select><select id='rangeEndOctave'></select></span>
+        </div>
+        <div>
+            <label>Loop & Tempo:</label>
+            <select id='loopMode'><option value='bounce'>Bounce Forever</option><option value='once'>One Loop</option></select>
+            <input id='tempo' type='number' value='400' style="width: 80px;">
+        </div>
+    </div>
+
+    <div style="margin-top: 15px;">
+        <button onclick='playPattern()'>Play</button>
+        <button onclick='pausePattern()'>Pause</button>
+        <button onclick='resumePattern()'>Resume</button>
+        <button onclick='stopPattern()'>Stop</button>
+    </div>
+
+    <div id="timelineContainer">
+      <input id="timeline" type="range" min="0" max="0" step="50" value="0">
+      <span id="timeLabel">00:00 / 00:00</span>
+    </div>
+
+    <div id="keyboard-container">
+        <div id='keyboard'></div>
+    </div>
+</div>
+
+<script>
+/* DATA & GLOBALS */
+const pitchNames=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const octaves=[2,3,4,5,6,7];
+const scales={ major:[0,2,4,5,7,9,11], minor:[0,2,3,5,7,8,10] };
+let walkTimeouts=[]; let isPaused=false; let scheduledEvents=[]; let totalDurationMs=0;
+let playStartSystemTime=0; let playStartOffset=0; let progressInterval=null;
+let mic, analyser, vocalTargetMidi=null, currentVocalIdx=0, vocalSequence=[];
+
+const piano=new Tone.Sampler({
+  urls:{'C1':'C1.mp3','C4':'C4.mp3','C7':'C7.mp3'},
+  baseUrl:'https://tonejs.github.io/audio/salamander/'
+}).toDestination();
+
+/* POPULATE MENUS */
+function pop(id, arr){ 
+    const s=document.getElementById(id); 
+    arr.forEach(v=>{const o=document.createElement('option');o.value=v;o.text=v;s.appendChild(o);}); 
+}
+pop('rootNoteName', pitchNames); pop('rootNoteOctave', octaves);
+pop('rangeStartName', pitchNames); pop('rangeStartOctave', octaves);
+pop('rangeEndName', pitchNames); pop('rangeEndOctave', octaves);
+
+/* KEYBOARD RENDERER */
+const keyboardDiv = document.getElementById('keyboard');
+const allKeys = [];
+let whiteCount = 0;
+for(let o=2; o<=7; o++){
+  ['C','D','E','F','G','A','B'].forEach(w => {
+    const wk = document.createElement('div'); 
+    wk.className='key'; wk.dataset.note = w+o; 
+    wk.style.left=(whiteCount*29)+'px'; // 28px width + 1px margin
+    keyboardDiv.appendChild(wk); allKeys.push(wk);
+    if(['C','D','F','G','A'].includes(w)){
+      const bk = document.createElement('div'); 
+      bk.className='key black'; bk.dataset.note = w+'#'+o; 
+      bk.style.left=(whiteCount*29+20)+'px';
+      keyboardDiv.appendChild(bk); allKeys.push(bk);
+    }
+    whiteCount++;
+  });
+}
+keyboardDiv.style.width=(whiteCount*29)+'px';
+
+/* ENGINE UTILS */
+function noteToMidi(n){ const p={C:0,'C#':1,D:2,'D#':3,E:4,F:5,'F#':6,G:7,'G#':8,A:9,'A#':10,B:11}; const m=n.match(/^([A-G]#?)(\d)$/); return p[m[1]]+(parseInt(m[2])+1)*12; }
+function midiToNote(m){ return pitchNames[m%12]+(Math.floor(m/12)-1); }
+function getSel(n,o){ return document.getElementById(n).value + document.getElementById(o).value; }
+function formatMS(ms){ const s=Math.floor(ms/1000); return Math.floor(s/60).toString().padStart(2,'0')+':'+(s%60).toString().padStart(2,'0'); }
+
+function toggleModeUI(){ document.getElementById('vocalUI').classList.toggle('hidden', document.getElementById('mainMode').value!=='vocal'); }
+
+/* GENERATOR LOGIC */
+function parseDegrees(input){
+  return input.split(',').map(s=>{
+    s=s.trim(); let acc=0; if(s[0]==='b') acc=-1; if(s[0]==='#') acc=1;
+    let dStr = s.replace(/[^\d]/g,''); let dashCount = (s.match(/-/g) || []).length;
+    return {degree:parseInt(dStr), accidental:acc, dashes:dashCount};
+  });
+}
+
+function generateWalk(rs, re, st, dl, lm){
+  const seq=[]; let asc=true; let root=rs; const steps=scales[st];
+  while(seq.length<100){
+    const notes=[]; dl.forEach(d=>{ const off=steps[(d.degree-1)%7]+Math.floor((d.degree-1)/7)*12+d.accidental; notes.push({midi:root+off, dashes:d.dashes}); });
+    if(notes.some(n=>n.midi>=rs && n.midi<=re)) seq.push({notes});
+    const max=Math.max(...notes.map(n=>n.midi)); const min=Math.min(...notes.map(n=>n.midi));
+    if(asc){ if(max>=re){asc=false; root--;} else root++; }
+    else { if(min<=rs){ if(lm==='once')break; asc=true; root++;} else root--; }
+  }
+  return seq;
+}
+
+async function playPattern(){
+  await Tone.start(); stopPattern();
+  const rs=noteToMidi(getSel('rangeStartName','rangeStartOctave'));
+  const re=noteToMidi(getSel('rangeEndName','rangeEndOctave'));
+  const walk=generateWalk(rs, re, document.getElementById('scaleType').value, parseDegrees(document.getElementById('pattern').value), document.getElementById('loopMode').value);
+  if(document.getElementById('mainMode').value==='vocal') startVocal(walk);
+  else runGenerator(walk, rs, re);
+}
+
+function runGenerator(walk, rs, re){
+  let time=0; let tempo=parseInt(document.getElementById('tempo').value)||400; 
+  scheduledEvents=[];
+  walk.forEach((step, i)=>{
+    step.notes.forEach(vn=>{
+      const n=midiToNote(vn.midi);
+      let ms = vn.dashes > 0 ? (1400 * vn.dashes) : tempo;
+      scheduledEvents.push({type:'note', time, note:n, dur: (ms/1000)+"s", ms});
+      time += ms + (vn.dashes > 0 ? 500 : 0);
+    });
+    const next=walk[i+1];
+    if(next){
+      const sorted=[...next.notes].sort((a,b)=>a.midi-b.midi);
+      const vamp=[sorted[0].midi, sorted[Math.floor(sorted.length/2)].midi, sorted[sorted.length-1].midi].map(m=>midiToNote(m));
+      scheduledEvents.push({type:'vamp', time:time+800, notes:vamp, dur:0.7}); 
+      time+=2300;
+    }
+  });
+  totalDurationMs=time; document.getElementById('timeline').max=totalDurationMs;
+  startScheduler(0);
+}
+
+function startScheduler(offset){
+  playStartSystemTime=Date.now(); playStartOffset=offset;
+  scheduledEvents.forEach(ev=>{
+    if(ev.time < offset) return;
+    walkTimeouts.push(setTimeout(()=>{
+      if(ev.type==='note'){
+        piano.triggerAttackRelease(ev.note, ev.dur);
+        const k=allKeys.find(k=>k.dataset.note===ev.note);
+        if(k){ k.classList.add('active'); setTimeout(()=>k.classList.remove('active'), 300); }
+      } else {
+        piano.triggerAttackRelease(ev.notes, ev.dur);
+        ev.notes.forEach(n=>{
+          const k=allKeys.find(k=>k.dataset.note===n);
+          if(k){ k.classList.add('active'); setTimeout(()=>k.classList.remove('active'), 500); }
+        });
+      }
+    }, ev.time - offset));
+  });
+  progressInterval=setInterval(()=>{
+    const elapsed=Date.now()-playStartSystemTime+playStartOffset;
+    document.getElementById('timeline').value=elapsed;
+    document.getElementById('timeLabel').innerText=formatMS(elapsed)+' / '+formatMS(totalDurationMs);
+    if(elapsed>=totalDurationMs) stopPattern();
+  },100);
+}
+
+/* VOCAL MODE */
+async function initVocalMic(){
+  await Tone.start(); 
+  if (Tone.context.state !== 'running') await Tone.context.resume();
+  mic=new Tone.UserMedia(); analyser=new Tone.Analyser("fft", 4096);
+  try {
+    await mic.open(); 
+    mic.connect(analyser); 
+    document.getElementById('vocalStatus').innerText = "Mic Active";
+    pitchLoop();
+  } catch(e) { alert("Mic Access Error. Check HTTPS."); }
+}
+
+function pitchLoop(){
+  if(!analyser) return;
+  const buf=analyser.getValue();
+  let max=-Infinity, idx=-1;
+  for(let i=0; i<buf.length; i++){ if(buf[i]>max){max=buf[i]; idx=i;} }
+  let p=0; if(idx>0 && idx<buf.length-1){ const a=buf[idx-1], b=buf[idx], g=buf[idx+1]; p=0.5*(a-g)/(a-2*b+g); }
+  const freq=(idx+p)*(Tone.context.sampleRate/2/buf.length);
+  if(freq>60){
+    const midi=12*Math.log2(freq/440)+69;
+    const note = midiToNote(Math.round(midi));
+    allKeys.forEach(k=>k.classList.remove('match-glow'));
+    const key=allKeys.find(k=>k.dataset.note===note);
+    if(key) key.classList.add('match-glow');
+    if(vocalTargetMidi){
+      const diff = midi - vocalTargetMidi;
+      const guide = document.getElementById('pitchGuide');
+      if(Math.abs(diff)<0.4){ guide.innerText="✓ MATCH"; guide.style.color="#0f0"; validateHit(); }
+      else { guide.innerText = diff > 0 ? "↓ LOWER" : "↑ HIGHER"; guide.style.color = diff > 0 ? "#f44" : "#4af"; }
+    }
+  }
+  requestAnimationFrame(pitchLoop);
+}
+
+function startVocal(walk){
+  vocalSequence=[]; walk.forEach(w=>w.notes.forEach(n=>vocalSequence.push({midi:n.midi, note:midiToNote(n.midi)})));
+  currentVocalIdx=0; nextVocalNote();
+}
+
+function nextVocalNote(){
+  const target=vocalSequence[currentVocalIdx]; if(!target) return;
+  vocalTargetMidi=target.midi; piano.triggerAttackRelease(target.note, "2n");
+  document.getElementById('vocalStatus').innerText=`Sing: ${target.note}`;
+  allKeys.forEach(k=>k.classList.remove('active'));
+  const k=allKeys.find(k=>k.dataset.note===target.note); if(k) k.classList.add('active');
+}
+
+function validateHit(){
+  vocalTargetMidi=null; currentVocalIdx++;
+  if(currentVocalIdx < vocalSequence.length) setTimeout(nextVocalNote, 1200);
+  else document.getElementById('vocalStatus').innerText="FINISHED!";
+}
+
+function stopPattern(){ walkTimeouts.forEach(clearTimeout); clearInterval(progressInterval); allKeys.forEach(k=>k.classList.remove('active','match-glow')); vocalTargetMidi=null; }
+function pausePattern(){ isPaused=true; walkTimeouts.forEach(clearTimeout); clearInterval(progressInterval); }
+function resumePattern(){ isPaused=false; startScheduler(parseInt(document.getElementById('timeline').value)); }
+</script>
+</body>
+</html>
